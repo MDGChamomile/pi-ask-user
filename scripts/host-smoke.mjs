@@ -161,4 +161,94 @@ for (const title of ["Alpha", "日本語 😀 café"]) {
    });
    assert.deepEqual(rendered.details.response, { kind: "selection", selections: [title] });
 }
-console.log("Host smoke passed: registration, schema, batch schema validation, RPC select, redacted event, thrown errors, error rendering, native TUI.");
+// Short reviews: every answer must be reachable by scrolling, within the height
+// cap and the width, with real wrapping. Inline matches Pi's fullscreen dock.
+const longQuestion = (n) => `Question ${n}: which of these fairly long options should the service use?`;
+// At width 40 the answer row "   → " plus this 31-cell title fills the inner width
+// exactly, so an overflow marker that costs width would cut off the "Z<n>Q" tail.
+const fullWidthAnswer = (n) => `Answer ${n} ${"a".repeat(19)}Z${n}Q`;
+for (const { displayMode, width, rows, cap } of [
+   { displayMode: "overlay", width: 80, rows: 8, cap: 6 },
+   { displayMode: "overlay", width: 40, rows: 7, cap: 5 },
+   { displayMode: "inline", width: 40, rows: 12, cap: 7 },
+]) {
+   await tool.execute("smoke-batch-short", {
+      questions: [1, 2, 3, 4].map((n) => ({ question: longQuestion(n), options: [{ title: fullWidthAnswer(n) }] })),
+      allowComment: false,
+      displayMode,
+   }, undefined, undefined, {
+      hasUI: true,
+      ui: {
+         custom: async (factory) => {
+            let response;
+            const component = factory(
+               { requestRender() {}, terminal: { rows } },
+               theme, getKeybindings(), (value) => { response = value; },
+            );
+            for (let n = 0; n < 4; n++) component.handleInput("\r");
+            const seen = new Set();
+            for (let step = 0; step < 30; step++) {
+               const lines = component.render(width);
+               assert.ok(lines.length <= cap, `${displayMode} review exceeds ${cap} rows`);
+               assert.ok(lines.some((line) => line.includes("submit")), `${displayMode} review hides its hints`);
+               for (const line of lines) {
+                  assert.ok(visibleWidth(line) <= width, `${displayMode} review line exceeds ${width} columns`);
+                  const answer = line.match(/Z[1-4]Q/);
+                  if (answer) seen.add(answer[0]);
+               }
+               component.handleInput("\x1b[B");
+            }
+            assert.deepEqual([...seen].sort(), ["Z1Q", "Z2Q", "Z3Q", "Z4Q"], `${displayMode} ${width}x${rows} review hides answer text`);
+            component.handleInput("\r");
+            return response;
+         },
+      },
+   });
+}
+// The batch prompt: its pages (strip in the frame title) and review page must fit
+// the width with the host's real wrapping, in both display modes.
+for (const displayMode of ["inline", "overlay"]) {
+   const batch = await tool.execute("smoke-batch-tui", {
+      questions: [
+         { question: "Choose one", context: "A **short** context.", options: [{ title: "日本語 😀 café" }, { title: "Beta" }] },
+         { question: "Pick another", options: [{ title: "Gamma" }], allowFreeform: false },
+      ],
+      allowComment: false,
+      displayMode,
+   }, undefined, undefined, {
+      hasUI: true,
+      ui: {
+         custom: async (factory) => {
+            let response;
+            const component = factory(
+               { requestRender() {}, terminal: { rows: 16 } },
+               theme, getKeybindings(), (value) => { response = value; },
+            );
+            const assertFits = (step) => {
+               for (const width of [40, 80]) {
+                  component.invalidate();
+                  for (const line of component.render(width)) {
+                     assert.ok(visibleWidth(line) <= width, `${displayMode} ${step} line exceeds ${width} columns`);
+                  }
+               }
+            };
+            assertFits("page");
+            component.handleInput("\r");
+            component.handleInput("\r");
+            assertFits("review");
+            assert.ok(component.render(80).some((line) => line.includes("Review answers")));
+            // Kitty's keyboard protocol sends "1" as CSI-u; it must still jump back to question 1.
+            component.handleInput("\x1b[49;1u");
+            assert.ok(!component.render(80).some((line) => line.includes("Review answers")), "CSI-u digit must open question 1");
+            component.handleInput("\r");
+            component.handleInput("\r");
+            return response;
+         },
+      },
+   });
+   assert.deepEqual(batch.details.answers, [
+      { status: "answered", response: { kind: "selection", selections: ["日本語 😀 café"] } },
+      { status: "answered", response: { kind: "selection", selections: ["Gamma"] } },
+   ]);
+}
+console.log("Host smoke passed: registration, schema, batch schema validation, RPC select, redacted event, thrown errors, error rendering, native TUI, batch TUI.");
